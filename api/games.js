@@ -1,30 +1,28 @@
-const REPO='zriderdev-coder/zr-games-downloads';
-const FILE='data/games.json';
-const github='https://api.github.com/repos/'+REPO+'/contents/'+FILE;
-const headers=()=>({'Authorization':'Bearer '+process.env.GITHUB_TOKEN,'Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28','Content-Type':'application/json'});
+import {get, put, head} from '@vercel/blob';
+import {randomUUID} from 'node:crypto';
+const PATH='catalog/games.json';
 function ip(req){return String(req.headers['x-vercel-forwarded-for']||req.headers['x-forwarded-for']||req.socket?.remoteAddress||'').split(',')[0].trim().replace(/^::ffff:/,'')}
 function admin(req){const allowed=process.env.ADMIN_ALLOWED_PUBLIC_IP;if(allowed&&ip(req)!==allowed)return false;const secret=process.env.ADMIN_PASSWORD;const given=String(req.headers['x-admin-key']||'');if(!secret||!given||given.length!==secret.length)return false;let diff=0;for(let i=0;i<secret.length;i++)diff|=secret.charCodeAt(i)^given.charCodeAt(i);return diff===0}
-async function load(){if(!process.env.GITHUB_TOKEN){const r=await fetch('https://raw.githubusercontent.com/'+REPO+'/main/'+FILE+'?t='+Date.now(),{cache:'no-store'});if(!r.ok)throw Error('Catalog '+r.status);return {sha:null,items:await r.json()}}const r=await fetch(github+'?t='+Date.now(),{headers:headers(),cache:'no-store'});if(!r.ok){console.error('GitHub catalog read failed',r.status,(await r.text()).slice(0,600));throw Error('Falha ao ler catalogo do GitHub: HTTP '+r.status)}const f=await r.json();return {sha:f.sha,items:JSON.parse(Buffer.from(f.content.replace(/\n/g,''),'base64').toString('utf8'))}}
+
+async function load(){const result=await get(PATH,{access:'private'});if(!result||result.statusCode===404)return {items:[],etag:null};if(result.statusCode!==200)throw Error('Blob read HTTP '+result.statusCode);const body=await new Response(result.stream).text();return {items:JSON.parse(body),etag:result.blob?.etag||null}}
+function safeUrl(s){try{const u=new URL(s);return ['https:','http:'].includes(u.protocol)&&!u.username&&!u.password}catch{return false}}
 export default async function handler(req,res){
  res.setHeader('Cache-Control','no-store');res.setHeader('X-Content-Type-Options','nosniff');
  if(req.method==='GET'&&req.query?.check==='admin')return res.status(admin(req)?200:403).json({ok:admin(req)});
- if(req.method==='GET'){try{const d=await load();return res.status(200).json(d.items)}catch(e){return res.status(503).json({error:'Catalogo temporariamente indisponivel'})}}
+ if(req.method==='GET'){try{return res.status(200).json((await load()).items)}catch(e){console.error('Blob read',e?.message);return res.status(503).json({error:'Catalogo indisponivel'})}}
  if(!['POST','DELETE'].includes(req.method))return res.status(405).json({error:'Metodo invalido'});
  if(!admin(req))return res.status(403).json({error:'Acesso negado'});
- if(!process.env.GITHUB_TOKEN)return res.status(503).json({error:'Armazenamento nao configurado'});
+ if(!process.env.BLOB_READ_WRITE_TOKEN)return res.status(503).json({error:'Vercel Blob nao configurado'});
  try{
-  const old=await load();let items=old.items;
-  if(req.method==='POST'){
-   const body=typeof req.body==='string'?JSON.parse(req.body):req.body||{};
-   const clean=s=>String(s||'').trim();
-   const title=clean(body.title).slice(0,90),description=clean(body.description).slice(0,500),image=clean(body.image),download=clean(body.download),genre=clean(body.genre).slice(0,35),size=clean(body.size).slice(0,30);
-   function safeUrl(s){try{let u=new URL(s);return ['https:','http:'].includes(u.protocol)&&!u.username&&!u.password}catch{return false}}
-   if(!title||!safeUrl(download)||!safeUrl(image))return res.status(400).json({error:'Preencha nome e URLs HTTP(S) validas'});
-   const item={id:clean(body.id)||crypto.randomUUID(),title,description,image,download,genre,size,createdAt:new Date().toISOString()};
-   if(body.id&&items.some(g=>g.id===body.id))items=items.map(g=>g.id===body.id?item:g);else items=[item,...items];
-  }else{const id=String(req.query?.id||'');items=items.filter(g=>g.id!==id)}
-  const write=await fetch(github,{method:'PUT',headers:headers(),body:JSON.stringify({message:'Update games catalog',content:Buffer.from(JSON.stringify(items,null,2)+'\n').toString('base64'),sha:old.sha})});
-  if(!write.ok){const detail=await write.text();console.error('GitHub catalog write failed',write.status,detail.slice(0,700));return res.status(502).json({error:write.status===403?'Token sem permissao de escrita no repositorio (Contents: Read and write).':write.status===401?'Token do GitHub invalido ou expirado.':write.status===409?'Conflito de edicao; tente novamente.':'GitHub recusou a gravacao (HTTP '+write.status+').'})}
-  return res.status(200).json({ok:true,items});
- }catch(e){console.error('Failed to save game',e?.stack||String(e));return res.status(503).json({error:e?.message?.startsWith('Falha ao ler catalogo')?e.message:'Falha ao salvar jogo no GitHub. Consulte logs da API.'})}
+ let items=(await load()).items;
+ if(req.method==='POST'){
+ const b=typeof req.body==='string'?JSON.parse(req.body):req.body||{},clean=v=>String(v||'').trim();
+ const title=clean(b.title).slice(0,90),description=clean(b.description).slice(0,500),image=clean(b.image),download=clean(b.download),genre=clean(b.genre).slice(0,35),size=clean(b.size).slice(0,30);
+ if(!title||!safeUrl(image)||!safeUrl(download))return res.status(400).json({error:'Nome, capa e link HTTP(S) sao obrigatorios'});
+ const id=clean(b.id)||randomUUID(),item={id,title,description,image,download,genre,size,createdAt:new Date().toISOString()};
+ if(b.id&&items.some(x=>x.id===b.id))items=items.map(x=>x.id===b.id?item:x);else items=[item,...items];
+ }else{const id=String(req.query?.id||'');items=items.filter(x=>x.id!==id)}
+ await put(PATH,JSON.stringify(items,null,2),{access:'private',allowOverwrite:true,addRandomSuffix:false,contentType:'application/json',cacheControlMaxAge:60});
+ return res.status(200).json({ok:true,items});
+ }catch(e){console.error('Blob write',e?.message||e);return res.status(503).json({error:'Nao foi possivel salvar no Vercel Blob: '+String(e?.message||'Erro').slice(0,140)})}
 }
