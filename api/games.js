@@ -4,7 +4,7 @@ const github='https://api.github.com/repos/'+REPO+'/contents/'+FILE;
 const headers=()=>({'Authorization':'Bearer '+process.env.GITHUB_TOKEN,'Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28','Content-Type':'application/json'});
 function ip(req){return String(req.headers['x-vercel-forwarded-for']||req.headers['x-forwarded-for']||req.socket?.remoteAddress||'').split(',')[0].trim().replace(/^::ffff:/,'')}
 function admin(req){const allowed=process.env.ADMIN_ALLOWED_PUBLIC_IP;if(allowed&&ip(req)!==allowed)return false;const secret=process.env.ADMIN_PASSWORD;const given=String(req.headers['x-admin-key']||'');if(!secret||!given||given.length!==secret.length)return false;let diff=0;for(let i=0;i<secret.length;i++)diff|=secret.charCodeAt(i)^given.charCodeAt(i);return diff===0}
-async function load(){if(!process.env.GITHUB_TOKEN){const r=await fetch('https://raw.githubusercontent.com/'+REPO+'/main/'+FILE+'?t='+Date.now(),{cache:'no-store'});if(!r.ok)throw Error('Catalog '+r.status);return {sha:null,items:await r.json()}}const r=await fetch(github+'?t='+Date.now(),{headers:headers(),cache:'no-store'});if(!r.ok)throw Error('GitHub read '+r.status);const f=await r.json();return {sha:f.sha,items:JSON.parse(Buffer.from(f.content.replace(/\n/g,''),'base64').toString('utf8'))}}
+async function load(){if(!process.env.GITHUB_TOKEN){const r=await fetch('https://raw.githubusercontent.com/'+REPO+'/main/'+FILE+'?t='+Date.now(),{cache:'no-store'});if(!r.ok)throw Error('Catalog '+r.status);return {sha:null,items:await r.json()}}const r=await fetch(github+'?t='+Date.now(),{headers:headers(),cache:'no-store'});if(!r.ok){console.error('GitHub catalog read failed',r.status,(await r.text()).slice(0,600));throw Error('Falha ao ler catalogo do GitHub: HTTP '+r.status)}const f=await r.json();return {sha:f.sha,items:JSON.parse(Buffer.from(f.content.replace(/\n/g,''),'base64').toString('utf8'))}}
 export default async function handler(req,res){
  res.setHeader('Cache-Control','no-store');res.setHeader('X-Content-Type-Options','nosniff');
  if(req.method==='GET'&&req.query?.check==='admin')return res.status(admin(req)?200:403).json({ok:admin(req)});
@@ -24,7 +24,7 @@ export default async function handler(req,res){
    if(body.id&&items.some(g=>g.id===body.id))items=items.map(g=>g.id===body.id?item:g);else items=[item,...items];
   }else{const id=String(req.query?.id||'');items=items.filter(g=>g.id!==id)}
   const write=await fetch(github,{method:'PUT',headers:headers(),body:JSON.stringify({message:'Update games catalog',content:Buffer.from(JSON.stringify(items,null,2)+'\n').toString('base64'),sha:old.sha})});
-  if(!write.ok)throw Error('GitHub write '+write.status);
+  if(!write.ok){const detail=await write.text();console.error('GitHub catalog write failed',write.status,detail.slice(0,700));return res.status(502).json({error:write.status===403?'Token sem permissao de escrita no repositorio (Contents: Read and write).':write.status===401?'Token do GitHub invalido ou expirado.':write.status===409?'Conflito de edicao; tente novamente.':'GitHub recusou a gravacao (HTTP '+write.status+').'})}
   return res.status(200).json({ok:true,items});
- }catch(e){return res.status(503).json({error:'Nao foi possivel salvar. Tente novamente.'})}
+ }catch(e){console.error('Failed to save game',e?.stack||String(e));return res.status(503).json({error:e?.message?.startsWith('Falha ao ler catalogo')?e.message:'Falha ao salvar jogo no GitHub. Consulte logs da API.'})}
 }
